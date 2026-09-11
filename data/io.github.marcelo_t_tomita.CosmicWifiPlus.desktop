@@ -1,0 +1,15 @@
+[Desktop Entry]
+Name=Wi-Fi Plus
+Comment=Omarchy-style Wi-Fi panel with live link metrics
+Type=Application
+Exec=cosmic-applet-wifi-panel
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Network;WiFi;
+Icon=network-wireless-signal-excellent-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10
