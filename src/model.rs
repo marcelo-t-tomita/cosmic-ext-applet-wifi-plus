@@ -57,17 +57,18 @@ pub fn band_label(band: &str) -> String {
 /// Under Automatic the pills are hidden, so the header carries the live band
 /// instead -- "WI-FI BAND: 2.4GHZ". Once a band is pinned the pills are on
 /// screen and say it themselves, so the header drops back to a plain label.
-pub fn band_section_title(selected: &str, current: &str) -> String {
+/// `None` means the plain label.
+pub fn band_header_value(selected: &str, current: &str) -> Option<String> {
     if selected != "auto" {
-        return "WI-FI BAND".to_string();
+        return None;
     }
 
     let label = band_label(current);
     if label.is_empty() {
-        return "WI-FI BAND".to_string();
+        return None;
     }
 
-    format!("WI-FI BAND: {}", label.to_uppercase())
+    Some(label.to_uppercase())
 }
 
 
@@ -89,42 +90,46 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec))
 }
 
-/// `has_samples` false means no probe has come back yet, which is different
-/// from a probe that timed out. The rows stay mounted through that gap and read
-/// "--" so the grid doesn't reflow a second after the panel opens.
-pub fn format_ping_latency(ms: f64, has_samples: bool) -> String {
+/// A latency reading, or why there is none. The panel turns this into a
+/// localized phrase: "no sample yet" and "the probe timed out" are different
+/// states and must read differently.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Latency {
+    /// No probe has come back yet. The row stays mounted and reads "--" so the
+    /// grid doesn't reflow a second after the panel opens.
+    Pending,
+    TimedOut,
+    Milliseconds(f64),
+}
+
+pub fn latency(ms: f64, has_samples: bool) -> Latency {
     if !has_samples {
-        return "--".to_string();
+        return Latency::Pending;
     }
     if !ms.is_finite() || ms < 0.0 {
-        return "Timeout".to_string();
+        return Latency::TimedOut;
     }
+    Latency::Milliseconds(ms)
+}
 
+/// Sub-ten latencies keep a decimal; above that it is noise.
+pub fn format_latency_value(ms: f64) -> String {
     if ms > 0.0 && ms < 10.0 {
-        format!("{ms:.1} ms")
+        format!("{ms:.1}")
     } else {
-        format!("{ms:.0} ms")
+        format!("{ms:.0}")
     }
 }
 
-pub fn format_packet_loss(percent: i32, has_samples: bool) -> String {
-    if !has_samples {
-        return "--".to_string();
-    }
-    if percent <= 0 {
-        return "0%".to_string();
-    }
-    format!("{percent}%")
-}
-
+/// The rotating status phrases, as translation keys.
 pub const CONNECTION_PHRASES: [&str; 7] = [
-    "Wiring bits",
-    "Handling packets",
-    "Sorting frames",
-    "Hauling bytes",
-    "Routing crumbs",
-    "Counting collisions",
-    "Bending light",
+    "phrase-wiring-bits",
+    "phrase-handling-packets",
+    "phrase-sorting-frames",
+    "phrase-hauling-bytes",
+    "phrase-routing-crumbs",
+    "phrase-counting-collisions",
+    "phrase-bending-light",
 ];
 
 /// Rolling byte counters turned into a live rate. A change of interface resets
@@ -230,16 +235,22 @@ fn packet_loss(samples: &[Option<f64>]) -> i32 {
     ((lost as f64 / samples.len() as f64) * 100.0).round() as i32
 }
 
-/// "KNOWN NETWORKS" above the saved ones, "OTHER NETWORKS" at the first unsaved
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Known,
+    Other,
+}
+
+/// "Known networks" above the saved ones, "Other networks" at the first unsaved
 /// row, nothing anywhere else.
-pub fn wifi_section_title(rows: &[crate::net::WifiRow], index: usize) -> Option<&'static str> {
+pub fn wifi_section(rows: &[crate::net::WifiRow], index: usize) -> Option<Section> {
     let row = rows.get(index)?;
 
     if row.known && index == 0 {
-        return Some("KNOWN NETWORKS");
+        return Some(Section::Known);
     }
     if !row.known && (index == 0 || rows.get(index - 1).map(|p| p.known).unwrap_or(false)) {
-        return Some("OTHER NETWORKS");
+        return Some(Section::Other);
     }
     None
 }
@@ -258,17 +269,18 @@ mod tests {
 
     #[test]
     fn formats_latency_with_sub_ten_precision() {
-        assert_eq!(format_ping_latency(0.0, false), "--");
-        assert_eq!(format_ping_latency(-1.0, true), "Timeout");
-        assert_eq!(format_ping_latency(4.23, true), "4.2 ms");
-        assert_eq!(format_ping_latency(42.7, true), "43 ms");
+        assert_eq!(latency(0.0, false), Latency::Pending);
+        assert_eq!(latency(-1.0, true), Latency::TimedOut);
+        assert_eq!(latency(4.23, true), Latency::Milliseconds(4.23));
+        assert_eq!(format_latency_value(4.23), "4.2");
+        assert_eq!(format_latency_value(42.7), "43");
     }
 
     #[test]
     fn band_header_carries_live_band_only_under_auto() {
-        assert_eq!(band_section_title("auto", "5"), "WI-FI BAND: 5GHZ");
-        assert_eq!(band_section_title("5", "5"), "WI-FI BAND");
-        assert_eq!(band_section_title("auto", ""), "WI-FI BAND");
+        assert_eq!(band_header_value("auto", "5").as_deref(), Some("5GHZ"));
+        assert_eq!(band_header_value("5", "5"), None);
+        assert_eq!(band_header_value("auto", ""), None);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 APP_ID="io.github.marcelo_t_tomita.CosmicWifiPlus"
-BIN_NAME="cosmic-wifi-plus"
+BIN_NAME="cosmic-ext-applet-wifi-plus"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 PANEL_CONFIG="$HOME/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings"

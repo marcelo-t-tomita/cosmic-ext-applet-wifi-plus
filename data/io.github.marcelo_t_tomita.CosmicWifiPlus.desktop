@@ -2,7 +2,7 @@
 Name=Wi-Fi Plus
 Comment=Omarchy-style Wi-Fi panel with live link metrics
 Type=Application
-Exec=cosmic-applet-wifi-panel
+Exec=cosmic-ext-applet-wifi-plus
 Terminal=false
 Categories=COSMIC;
 Keywords=COSMIC;Applet;Network;WiFi;

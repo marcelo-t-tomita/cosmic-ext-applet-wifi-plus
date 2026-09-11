@@ -1,5 +1,6 @@
 //! The panel itself: an Omarchy-style Wi-Fi popup rendered as a COSMIC applet.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use cosmic::app::{Core, Task};
@@ -8,14 +9,15 @@ use cosmic::iced::core::window;
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::widget::{
-    button, column, container, divider, icon::from_name, indeterminate_circular, layer_container,
-    qr_code, row, scrollable, secure_input, text, text_input, toggler,
+    Id, autosize, button, column, container, divider, icon::from_name, indeterminate_circular,
+    qr_code, row, scrollable, secure_input, space, text, text_input, toggler,
 };
 use cosmic::Element;
 
 use crate::config::Settings;
+use crate::fl;
 use crate::model::{self, PingSamples, Throughput};
-use crate::net::{self, Kind, Security};
+use crate::net::{self, Failure, Kind, Security};
 
 pub const APP_ID: &str = "io.github.marcelo_t_tomita.CosmicWifiPlus";
 
@@ -27,6 +29,11 @@ const RESCAN_TICKS: u32 = 5;
 const PHRASE_TICKS: u32 = 5;
 const POPUP_WIDTH: f32 = 420.0;
 const MAX_LABEL_CHARS: usize = 18;
+
+/// The bar widget changes width when the SSID label is toggled, so the applet
+/// surface has to renegotiate its size with the panel rather than stay at the
+/// icon's fixed square -- without this the label is simply clipped away.
+static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"));
 
 pub fn run() -> cosmic::iced::Result {
     cosmic::applet::run::<WifiPanel>(())
@@ -59,7 +66,7 @@ pub enum SpeedTest {
     Idle,
     Running { upload: bool },
     Done { mbps: f64, upload: bool },
-    Failed(String),
+    Failed(Failure),
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +83,7 @@ pub enum Message {
     TogglePasswordVisible,
     SubmitPassword,
     Forget(String),
-    ActionDone(Result<(), String>),
+    ActionDone(Result<(), Failure>),
     ToggleBandAuto(bool),
     SetBand(String),
     SetDns(String),
@@ -84,7 +91,7 @@ pub enum Message {
     QrReady(Option<String>),
     HideQr,
     RunSpeedTest(bool),
-    SpeedTestDone(Result<f64, String>),
+    SpeedTestDone(Result<f64, Failure>),
     OpenCaptivePortal,
     ToggleSsidLabel(bool),
 }
@@ -114,7 +121,7 @@ pub struct WifiPanel {
 
     busy: Option<(String, ActionKind)>,
     /// The SSID a failure belongs to, and the phrase to show on its row.
-    failure: Option<(String, String)>,
+    failure: Option<(String, Failure)>,
 
     qr: Option<qr_code::Data>,
     speedtest: SpeedTest,
@@ -194,14 +201,50 @@ fn poll_task(full: bool, rescan: bool) -> Task<Message> {
 /// Runs one nmcli-backed action off the UI thread.
 fn action_task<F>(work: F) -> Task<Message>
 where
-    F: FnOnce() -> Result<(), String> + Send + 'static,
+    F: FnOnce() -> Result<(), Failure> + Send + 'static,
 {
     cosmic::task::future(async move {
         let result = tokio::task::spawn_blocking(work)
             .await
-            .unwrap_or_else(|_| Err("Action failed".to_string()));
+            .unwrap_or(Err(Failure::ConnectionFailed));
         Message::ActionDone(result)
     })
+}
+
+/// Turns a failure into the phrase shown on the offending row.
+fn failure_text(failure: Failure) -> String {
+    match failure {
+        Failure::PassphraseRequired => fl!("passphrase-required"),
+        Failure::WrongPassword => fl!("wrong-password"),
+        Failure::NetworkLost => fl!("network-lost"),
+        Failure::ConnectionFailed => fl!("connection-failed"),
+        Failure::DisconnectFailed => fl!("disconnect-failed"),
+        Failure::ForgetFailed => fl!("forget-failed"),
+        Failure::WifiToggleFailed => fl!("wifi-toggle-failed"),
+        Failure::NoProfile => fl!("no-profile"),
+        Failure::BandSetFailed => fl!("band-set-failed"),
+        Failure::BandReverted => fl!("band-reverted"),
+        Failure::DnsSetFailed => fl!("dns-set-failed"),
+        Failure::SpeedTestFailed => fl!("speed-test-failed"),
+        Failure::CurlRequired => fl!("curl-required"),
+    }
+}
+
+fn latency_text(ms: f64, has_samples: bool) -> String {
+    match model::latency(ms, has_samples) {
+        model::Latency::Pending => fl!("no-data"),
+        model::Latency::TimedOut => fl!("timeout"),
+        model::Latency::Milliseconds(ms) => {
+            fl!("milliseconds", value = model::format_latency_value(ms))
+        }
+    }
+}
+
+fn packet_loss_text(percent: i32, has_samples: bool) -> String {
+    if !has_samples {
+        return fl!("no-data");
+    }
+    format!("{}%", percent.max(0))
 }
 
 impl WifiPanel {
@@ -245,7 +288,7 @@ impl WifiPanel {
     fn settings_section(&self) -> Element<'_, Message> {
         padded_control(
             row::with_children(vec![
-                text::body("Show network name in panel")
+                text::body(fl!("show-network-name"))
                     .width(Length::Fill)
                     .into(),
                 toggler(self.settings.show_ssid)
@@ -260,6 +303,29 @@ impl WifiPanel {
 
     fn network(&self, ssid: &str) -> Option<&net::WifiRow> {
         self.rows.iter().find(|row| row.ssid == ssid)
+    }
+
+    fn connection_phrase(&self) -> String {
+        let key = model::CONNECTION_PHRASES[self.phrase_index % model::CONNECTION_PHRASES.len()];
+
+        // Fluent ids must be literals for the macro, so the rotation maps its
+        // key onto one of the seven calls rather than looking one up.
+        match key {
+            "phrase-wiring-bits" => fl!("phrase-wiring-bits"),
+            "phrase-handling-packets" => fl!("phrase-handling-packets"),
+            "phrase-sorting-frames" => fl!("phrase-sorting-frames"),
+            "phrase-hauling-bytes" => fl!("phrase-hauling-bytes"),
+            "phrase-routing-crumbs" => fl!("phrase-routing-crumbs"),
+            "phrase-counting-collisions" => fl!("phrase-counting-collisions"),
+            _ => fl!("phrase-bending-light"),
+        }
+    }
+
+    fn band_title(&self) -> String {
+        match model::band_header_value(&self.band.selected, &self.band.current) {
+            Some(band) => fl!("wifi-band-current", band = band),
+            None => fl!("wifi-band"),
+        }
     }
 
     fn header_detail(&self) -> String {
@@ -277,13 +343,13 @@ impl WifiPanel {
         let title = match self.status.kind {
             Kind::Wifi => {
                 if self.status.ssid.is_empty() {
-                    "Wi-Fi".to_string()
+                    fl!("wifi")
                 } else {
                     self.status.ssid.clone()
                 }
             }
-            Kind::Ethernet => "Ethernet".to_string(),
-            Kind::Disconnected => "Disconnected".to_string(),
+            Kind::Ethernet => fl!("ethernet"),
+            Kind::Disconnected => fl!("disconnected"),
         };
 
         let detail = self.header_detail();
@@ -294,12 +360,11 @@ impl WifiPanel {
         };
 
         let meta = if self.restricted() {
-            "LIMITED INTERNET ACCESS".to_string()
+            fl!("limited-internet-access")
         } else if self.status.connected() {
-            model::CONNECTION_PHRASES[self.phrase_index % model::CONNECTION_PHRASES.len()]
-                .to_uppercase()
+            self.connection_phrase().to_uppercase()
         } else {
-            "NOT CONNECTED".to_string()
+            fl!("not-connected")
         };
 
         let labels = column::with_children(vec![
@@ -313,7 +378,7 @@ impl WifiPanel {
 
         if self.status.kind == Kind::Wifi && self.status.connected() {
             actions.push(
-                button::icon(from_name("phone-symbolic").size(16))
+                button::icon(from_name("send-to-symbolic").size(16))
                     .icon_size(16)
                     .on_press(Message::ShowQr)
                     .into(),
@@ -345,7 +410,7 @@ impl WifiPanel {
         .into()
     }
 
-    fn metric<'a>(&self, label: &'a str, value: String) -> Element<'a, Message> {
+    fn metric<'a>(&self, label: String, value: String) -> Element<'a, Message> {
         row::with_children(vec![
             text::caption(label).into(),
             text::body(value)
@@ -383,17 +448,17 @@ impl WifiPanel {
             if has_transfer {
                 model::format_rate(value)
             } else {
-                "--".to_string()
+                fl!("no-data")
             }
         };
         let total = |value: Option<u64>| {
             value
                 .map(|v| model::format_bytes(v as f64))
-                .unwrap_or_else(|| "--".to_string())
+                .unwrap_or_else(|| fl!("no-data"))
         };
         let or_dash = |value: &str| {
             if value.is_empty() {
-                "--".to_string()
+                fl!("no-data")
             } else {
                 value.to_string()
             }
@@ -402,25 +467,25 @@ impl WifiPanel {
         column::with_children(vec![
             self.metric_row(
                 self.metric(
-                    "Ping",
-                    model::format_ping_latency(self.pings.internet_latency(), has_samples),
+                    fl!("ping"),
+                    latency_text(self.pings.internet_latency(), has_samples),
                 ),
                 self.metric(
-                    "Packet Loss",
-                    model::format_packet_loss(self.pings.internet_packet_loss(), has_samples),
+                    fl!("packet-loss"),
+                    packet_loss_text(self.pings.internet_packet_loss(), has_samples),
                 ),
             ),
             self.metric_row(
-                self.metric("Receiving", rate(self.throughput.download_rate)),
-                self.metric("Sending", rate(self.throughput.upload_rate)),
+                self.metric(fl!("receiving"), rate(self.throughput.download_rate)),
+                self.metric(fl!("sending"), rate(self.throughput.upload_rate)),
             ),
             self.metric_row(
-                self.metric("Downloaded", total(self.status.rx_bytes)),
-                self.metric("Uploaded", total(self.status.tx_bytes)),
+                self.metric(fl!("downloaded"), total(self.status.rx_bytes)),
+                self.metric(fl!("uploaded"), total(self.status.tx_bytes)),
             ),
             self.metric_row(
-                self.metric("IP Address", or_dash(&self.status.ip)),
-                self.metric("Gateway", or_dash(&self.status.gateway)),
+                self.metric(fl!("ip-address"), or_dash(&self.status.ip)),
+                self.metric(fl!("gateway"), or_dash(&self.status.gateway)),
             ),
         ])
         .spacing(6)
@@ -437,13 +502,8 @@ impl WifiPanel {
         let pinned = self.band.selected != "auto";
 
         let header = row::with_children(vec![
-            text::caption(model::band_section_title(
-                &self.band.selected,
-                &self.band.current,
-            ))
-            .width(Length::Fill)
-            .into(),
-            text::caption("AUTOMATIC").into(),
+            text::caption(self.band_title()).width(Length::Fill).into(),
+            text::caption(fl!("automatic")).into(),
             toggler(!pinned).on_toggle(Message::ToggleBandAuto).into(),
         ])
         .spacing(8)
@@ -480,14 +540,19 @@ impl WifiPanel {
         // "Custom" is a state the panel can report but not set: it means DNS
         // servers were configured outside the panel, and clicking it would have
         // nothing to apply.
-        let pills: Vec<Element<'_, Message>> = ["DHCP", "Cloudflare", "Google", "Custom"]
-            .into_iter()
-            .map(|provider| {
+        let pills: Vec<Element<'_, Message>> = [
+            ("DHCP", fl!("dns-dhcp")),
+            ("Cloudflare", fl!("dns-cloudflare")),
+            ("Google", fl!("dns-google")),
+            ("Custom", fl!("dns-custom")),
+        ]
+        .into_iter()
+        .map(|(provider, label)| {
                 let selected = self.dns == provider;
                 let pill = if selected {
-                    button::suggested(provider)
+                    button::suggested(label)
                 } else {
-                    button::standard(provider)
+                    button::standard(label)
                 };
 
                 let pill = pill.width(Length::Fill);
@@ -501,7 +566,7 @@ impl WifiPanel {
             .collect();
 
         column::with_children(vec![
-            text::caption("DNS PROVIDER").into(),
+            text::caption(fl!("dns-provider")).into(),
             row::with_children(pills).spacing(6).into(),
         ])
         .spacing(10)
@@ -513,11 +578,10 @@ impl WifiPanel {
             if ssid == &row.ssid {
                 return Some((
                     match kind {
-                        ActionKind::Connect => "Connecting…",
-                        ActionKind::Disconnect => "Disconnecting…",
-                        ActionKind::Forget => "Forgetting…",
-                    }
-                    .to_string(),
+                        ActionKind::Connect => fl!("connecting"),
+                        ActionKind::Disconnect => fl!("disconnecting"),
+                        ActionKind::Forget => fl!("forgetting"),
+                    },
                     false,
                 ));
             }
@@ -525,14 +589,14 @@ impl WifiPanel {
 
         if row.connected {
             if self.restricted() {
-                return Some(("Sign-in required".to_string(), true));
+                return Some((fl!("sign-in-required"), true));
             }
-            return Some(("Connected".to_string(), false));
+            return Some((fl!("connected"), false));
         }
 
         if let Some((ssid, reason)) = &self.failure {
             if ssid == &row.ssid {
-                return Some((reason.clone(), true));
+                return Some((failure_text(*reason), true));
             }
         }
 
@@ -554,7 +618,7 @@ impl WifiPanel {
 
         content.push(
             text::body(if row.ssid.is_empty() {
-                "Hidden".to_string()
+                fl!("hidden-network")
             } else {
                 row.ssid.clone()
             })
@@ -583,7 +647,7 @@ impl WifiPanel {
 
         if row.security == Security::Enterprise {
             fields = fields.push(
-                text_input("Identity (user@domain)", &self.identity)
+                text_input(fl!("identity-placeholder"), &self.identity)
                     .on_input(Message::IdentityChanged)
                     .on_submit(|_| Message::SubmitPassword),
             );
@@ -591,7 +655,7 @@ impl WifiPanel {
 
         fields = fields.push(
             secure_input(
-                "Passphrase",
+                fl!("passphrase-placeholder"),
                 &self.password,
                 Some(Message::TogglePasswordVisible),
                 self.password_hidden,
@@ -602,10 +666,10 @@ impl WifiPanel {
 
         fields = fields.push(
             row::with_children(vec![
-                button::standard("Cancel")
+                button::standard(fl!("cancel"))
                     .on_press(Message::CollapsePrompt)
                     .into(),
-                button::suggested("Connect")
+                button::suggested(fl!("connect"))
                     .on_press(Message::SubmitPassword)
                     .into(),
             ])
@@ -617,17 +681,21 @@ impl WifiPanel {
 
     fn network_list(&self) -> Element<'_, Message> {
         if !self.wifi_enabled {
-            return padded_control(text::caption("WI-FI IS OFF")).into();
+            return padded_control(text::caption(fl!("wifi-is-off"))).into();
         }
 
         if self.rows.is_empty() {
-            return padded_control(text::caption("SCANNING WI-FI…")).into();
+            return padded_control(text::caption(fl!("scanning-wifi"))).into();
         }
 
         let mut list = column::with_capacity(self.rows.len()).spacing(2);
 
         for (index, row) in self.rows.iter().enumerate() {
-            if let Some(title) = model::wifi_section_title(&self.rows, index) {
+            if let Some(section) = model::wifi_section(&self.rows, index) {
+                let title = match section {
+                    model::Section::Known => fl!("known-networks"),
+                    model::Section::Other => fl!("other-networks"),
+                };
                 list = list.push(padded_control(text::caption(title)));
             }
 
@@ -652,23 +720,23 @@ impl WifiPanel {
         let content = match &self.speedtest {
             SpeedTest::Idle => return None,
             SpeedTest::Running { upload } => row::with_children(vec![
-                text::caption(if *upload { "UPLOAD TEST" } else { "DOWNLOAD TEST" })
+                text::caption(if *upload { fl!("upload-test") } else { fl!("download-test") })
                     .width(Length::Fill)
                     .into(),
                 indeterminate_circular().size(16.0).into(),
             ]),
             SpeedTest::Done { mbps, upload } => row::with_children(vec![
-                text::caption(if *upload { "UPLOAD" } else { "DOWNLOAD" })
+                text::caption(if *upload { fl!("upload") } else { fl!("download") })
                     .width(Length::Fill)
                     .into(),
-                text::body(format!("{mbps:.0} mbit/s")).into(),
-                button::standard(if *upload { "Test down" } else { "Test up" })
+                text::body(fl!("megabits-per-second", value = format!("{mbps:.0}"))).into(),
+                button::standard(if *upload { fl!("test-download") } else { fl!("test-upload") })
                     .on_press(Message::RunSpeedTest(!*upload))
                     .into(),
             ]),
             SpeedTest::Failed(reason) => row::with_children(vec![
-                text::caption(reason.clone()).width(Length::Fill).into(),
-                button::standard("Retry")
+                text::caption(failure_text(*reason)).width(Length::Fill).into(),
+                button::standard(fl!("retry"))
                     .on_press(Message::RunSpeedTest(false))
                     .into(),
             ]),
@@ -679,12 +747,12 @@ impl WifiPanel {
 
     fn qr_panel<'a>(&self, data: &'a qr_code::Data) -> Element<'a, Message> {
         column::with_children(vec![
-            text::caption("SCAN TO JOIN").into(),
+            text::caption(fl!("scan-to-join")).into(),
             container(qr_code(data).cell_size(6))
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .into(),
-            button::standard("Close")
+            button::standard(fl!("close"))
                 .on_press(Message::HideQr)
                 .into(),
         ])
@@ -821,7 +889,7 @@ impl cosmic::Application for WifiPanel {
                     if net::set_wifi_enabled(enabled) {
                         Ok(())
                     } else {
-                        Err("Could not toggle Wi-Fi".to_string())
+                        Err(Failure::WifiToggleFailed)
                     }
                 });
             }
@@ -916,9 +984,7 @@ impl cosmic::Application for WifiPanel {
                         // A wrong passphrase leaves the prompt open so it can
                         // be corrected -- nmcli has already saved the bad
                         // profile, and reconnecting overwrites the stored PSK.
-                        let credentials = reason == "Wrong password"
-                            || reason == "Passphrase required";
-                        if credentials && !ssid.is_empty() {
+                        if reason.needs_passphrase() && !ssid.is_empty() {
                             self.prompt = Some(ssid.clone());
                         }
                         self.failure = Some((ssid, reason));
@@ -987,7 +1053,7 @@ impl cosmic::Application for WifiPanel {
                     let result =
                         tokio::task::spawn_blocking(move || net::speedtest(&iface, upload))
                             .await
-                            .unwrap_or_else(|_| Err("Speed test failed".to_string()));
+                            .unwrap_or(Err(Failure::SpeedTestFailed));
                     Message::SpeedTestDone(result)
                 });
             }
@@ -1018,44 +1084,41 @@ impl cosmic::Application for WifiPanel {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let Some(label) = self.bar_label() else {
-            return self
+        let button = match self.bar_label() {
+            None => self
                 .core
                 .applet
                 .icon_button(&self.icon_name)
-                .on_press_down(Message::TogglePopup)
-                .into();
+                .on_press_down(Message::TogglePopup),
+
+            Some(label) => {
+                // `icon_button` is a fixed square, so the labelled form is built
+                // by hand: an invisible vertical spacer holds the panel's
+                // suggested height, and `applet.text` picks up the bar's font
+                // size, matching how the stock clock applet lays itself out.
+                let suggested = self.core.applet.suggested_size(true);
+                let padding = self.core.applet.suggested_padding(true);
+                let height = f32::from(suggested.1 + 2 * padding.1);
+
+                let content = row::with_children(vec![
+                    from_name(&*self.icon_name)
+                        .size(suggested.0)
+                        .symbolic(true)
+                        .into(),
+                    self.core.applet.text(label).into(),
+                    container(space::vertical().height(Length::Fixed(height))).into(),
+                ])
+                .spacing(4)
+                .align_y(Alignment::Center);
+
+                button::custom(content)
+                    .padding([0, padding.0])
+                    .on_press_down(Message::TogglePopup)
+                    .class(cosmic::theme::Button::AppletIcon)
+            }
         };
 
-        // `icon_button` is a fixed square, so a label needs a button built by
-        // hand. The sizing mirrors the applet context's own `text_button` so
-        // this sits at the same height as every neighbouring applet.
-        let suggested = self.core.applet.suggested_size(true);
-        let (major, minor) = self.core.applet.suggested_padding(true);
-        let (horizontal_padding, vertical_padding) = if self.core.applet.is_horizontal() {
-            (major, minor)
-        } else {
-            (minor, major)
-        };
-
-        let content = row::with_children(vec![
-            from_name(&*self.icon_name)
-                .size(suggested.0)
-                .symbolic(true)
-                .into(),
-            text::body(label).into(),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        button::custom(
-            layer_container(content)
-                .center_y(Length::Fixed(f32::from(suggested.1 + 2 * vertical_padding))),
-        )
-        .on_press_down(Message::TogglePopup)
-        .padding([0, horizontal_padding])
-        .class(cosmic::theme::Button::AppletIcon)
-        .into()
+        autosize::autosize(button, AUTOSIZE_MAIN_ID.clone()).into()
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
@@ -1065,7 +1128,7 @@ impl cosmic::Application for WifiPanel {
 
         if self.restricted() {
             content = content.push(
-                button::suggested("Open Captive Portal")
+                button::suggested(fl!("open-captive-portal"))
                     .width(Length::Fill)
                     .on_press(Message::OpenCaptivePortal),
             );

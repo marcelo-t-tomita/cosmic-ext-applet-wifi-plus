@@ -283,6 +283,34 @@ pub fn pings(gateway: &str) -> (Option<f64>, Option<f64>) {
     (router, ping(INTERNET_PROBE))
 }
 
+/// Why an action did not go through. The panel turns these into localized
+/// phrases; keeping them as variants rather than English strings is what makes
+/// that possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    PassphraseRequired,
+    WrongPassword,
+    NetworkLost,
+    ConnectionFailed,
+    DisconnectFailed,
+    ForgetFailed,
+    WifiToggleFailed,
+    NoProfile,
+    BandSetFailed,
+    BandReverted,
+    DnsSetFailed,
+    SpeedTestFailed,
+    CurlRequired,
+}
+
+impl Failure {
+    /// Whether the failure means the stored passphrase is the problem, so the
+    /// prompt should reopen for a correction.
+    pub fn needs_passphrase(self) -> bool {
+        matches!(self, Self::PassphraseRequired | Self::WrongPassword)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Security {
     Open,
@@ -415,20 +443,20 @@ pub fn set_wifi_enabled(enabled: bool) -> bool {
     run_ok("nmcli", &["radio", "wifi", if enabled { "on" } else { "off" }])
 }
 
-pub fn connect_known(ssid: &str) -> Result<(), String> {
+pub fn connect_known(ssid: &str) -> Result<(), Failure> {
     run("nmcli", &["connection", "up", "id", ssid])
         .map(|_| ())
-        .ok_or_else(|| "Failed to connect".to_string())
+        .ok_or(Failure::ConnectionFailed)
 }
 
 /// An open or OWE network takes no credentials, so `password` must be absent
 /// from the command line rather than empty -- nmcli rejects an empty one.
-pub fn connect_open(ssid: &str) -> Result<(), String> {
+pub fn connect_open(ssid: &str) -> Result<(), Failure> {
     let out = Command::new("nmcli")
         .args(["device", "wifi", "connect", ssid])
         .env("LC_ALL", "C")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Failure::ConnectionFailed)?;
 
     if out.status.success() {
         Ok(())
@@ -437,7 +465,7 @@ pub fn connect_open(ssid: &str) -> Result<(), String> {
     }
 }
 
-pub fn connect_psk(ssid: &str, password: &str) -> Result<(), String> {
+pub fn connect_psk(ssid: &str, password: &str) -> Result<(), Failure> {
     // The passphrase is an argument here, which /proc exposes for the lifetime
     // of the process. nmcli offers no stdin path for `device wifi connect`, so
     // this mirrors what `nmcli` users type anyway; the enterprise path below
@@ -446,7 +474,7 @@ pub fn connect_psk(ssid: &str, password: &str) -> Result<(), String> {
         .args(["device", "wifi", "connect", ssid, "password", password])
         .env("LC_ALL", "C")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Failure::ConnectionFailed)?;
 
     if out.status.success() {
         Ok(())
@@ -459,7 +487,7 @@ pub fn connect_psk(ssid: &str, password: &str) -> Result<(), String> {
 /// scriptable `connection edit` editor -- argv is world-readable in /proc, so
 /// the secret must never be an argument. Ported from Omarchy's
 /// `enterpriseConnectScript`.
-pub fn connect_enterprise(ssid: &str, identity: &str, password: &str) -> Result<(), String> {
+pub fn connect_enterprise(ssid: &str, identity: &str, password: &str) -> Result<(), Failure> {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -478,16 +506,16 @@ pub fn connect_enterprise(ssid: &str, identity: &str, password: &str) -> Result<
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Failure::ConnectionFailed)?;
 
     child
         .stdin
         .as_mut()
-        .ok_or("no stdin")?
+        .ok_or(Failure::ConnectionFailed)?
         .write_all(format!("{password}\n").as_bytes())
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Failure::ConnectionFailed)?;
 
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|_| Failure::ConnectionFailed)?;
 
     if out.status.success() {
         Ok(())
@@ -496,31 +524,31 @@ pub fn connect_enterprise(ssid: &str, identity: &str, password: &str) -> Result<
     }
 }
 
-/// nmcli's stderr mapped onto the same short phrases the Omarchy panel shows.
-fn failure_reason(stderr: &str) -> String {
+/// nmcli's stderr mapped onto the same distinctions the Omarchy panel draws.
+fn failure_reason(stderr: &str) -> Failure {
     let lower = stderr.to_lowercase();
 
     if lower.contains("secrets were required") || lower.contains("no secrets") {
-        "Passphrase required".to_string()
+        Failure::PassphraseRequired
     } else if lower.contains("802.1x supplicant") || lower.contains("timeout") {
-        "Wrong password".to_string()
+        Failure::WrongPassword
     } else if lower.contains("no network with ssid") {
-        "Network lost".to_string()
+        Failure::NetworkLost
     } else {
-        "Failed to connect".to_string()
+        Failure::ConnectionFailed
     }
 }
 
-pub fn disconnect(ssid: &str) -> Result<(), String> {
+pub fn disconnect(ssid: &str) -> Result<(), Failure> {
     run("nmcli", &["connection", "down", "id", ssid])
         .map(|_| ())
-        .ok_or_else(|| "Failed to disconnect".to_string())
+        .ok_or(Failure::DisconnectFailed)
 }
 
-pub fn forget(ssid: &str) -> Result<(), String> {
+pub fn forget(ssid: &str) -> Result<(), Failure> {
     run("nmcli", &["connection", "delete", "id", ssid])
         .map(|_| ())
-        .ok_or_else(|| "Failed to forget".to_string())
+        .ok_or(Failure::ForgetFailed)
 }
 
 // ---------------------------------------------------------------------------
@@ -660,15 +688,15 @@ pub fn band_status(status: &Status) -> BandStatus {
 /// A band change only takes effect on reassociation. If the radio cannot come
 /// back up on the requested band, the previous setting is put back and
 /// reconnected rather than leaving the machine stranded offline.
-pub fn set_band(profile: &str, target: &str) -> Result<(), String> {
+pub fn set_band(profile: &str, target: &str) -> Result<(), Failure> {
     if profile.is_empty() {
-        return Err("No active Wi-Fi connection profile".to_string());
+        return Err(Failure::NoProfile);
     }
 
     let desired = if target == "auto" {
         ""
     } else {
-        nm_band_for(target).ok_or_else(|| format!("Unknown band {target}"))?
+        nm_band_for(target).ok_or(Failure::BandSetFailed)?
     };
 
     let previous = run(
@@ -687,7 +715,7 @@ pub fn set_band(profile: &str, target: &str) -> Result<(), String> {
         "nmcli",
         &["connection", "modify", profile, "802-11-wireless.band", desired],
     ) {
-        return Err("Could not set band".to_string());
+        return Err(Failure::BandSetFailed);
     }
 
     if run_ok("nmcli", &["connection", "up", profile]) {
@@ -700,7 +728,7 @@ pub fn set_band(profile: &str, target: &str) -> Result<(), String> {
     );
     let _ = run_ok("nmcli", &["connection", "up", profile]);
 
-    Err(format!("Could not connect on {target}GHz; reverted"))
+    Err(Failure::BandReverted)
 }
 
 // ---------------------------------------------------------------------------
@@ -733,9 +761,9 @@ pub fn dns_provider(profile: &str) -> String {
 
 /// Writing `ipv4.dns` only takes effect on reactivation, so the profile is
 /// bounced the same way a band change is.
-pub fn set_dns(profile: &str, servers: &str) -> Result<(), String> {
+pub fn set_dns(profile: &str, servers: &str) -> Result<(), Failure> {
     if profile.is_empty() {
-        return Err("No active connection profile".to_string());
+        return Err(Failure::NoProfile);
     }
 
     let ignore_auto = if servers.is_empty() { "no" } else { "yes" };
@@ -746,13 +774,13 @@ pub fn set_dns(profile: &str, servers: &str) -> Result<(), String> {
             &["connection", "modify", profile, "ipv4.ignore-auto-dns", ignore_auto],
         )
     {
-        return Err("Could not set DNS".to_string());
+        return Err(Failure::DnsSetFailed);
     }
 
     if run_ok("nmcli", &["connection", "up", profile]) {
         Ok(())
     } else {
-        Err("Could not reapply the connection".to_string())
+        Err(Failure::DnsSetFailed)
     }
 }
 
@@ -827,11 +855,11 @@ pub fn wifi_qr_payload(iface: &str) -> Option<String> {
 
 /// Netflix's fast.com endpoints, measured against this interface's own byte
 /// counters rather than curl's reported rate, so parallel streams add up.
-pub fn speedtest(iface: &str, upload: bool) -> Result<f64, String> {
+pub fn speedtest(iface: &str, upload: bool) -> Result<f64, Failure> {
     use std::time::{Duration, Instant};
 
     if !has_command("curl") {
-        return Err("curl is required".to_string());
+        return Err(Failure::CurlRequired);
     }
 
     let token = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm";
@@ -839,9 +867,9 @@ pub fn speedtest(iface: &str, upload: bool) -> Result<f64, String> {
         "https://api.fast.com/netflix/speedtest/v2?https=true&token={token}&urlCount=3"
     );
 
-    let body = run("curl", &["-fsS", &api]).ok_or("Failed to reach the speed test API")?;
+    let body = run("curl", &["-fsS", &api]).ok_or(Failure::SpeedTestFailed)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&body).map_err(|_| "Bad speed test response".to_string())?;
+        serde_json::from_str(&body).map_err(|_| Failure::SpeedTestFailed)?;
 
     let urls: Vec<String> = parsed
         .get("targets")
@@ -854,7 +882,7 @@ pub fn speedtest(iface: &str, upload: bool) -> Result<f64, String> {
         .unwrap_or_default();
 
     if urls.is_empty() {
-        return Err("No speed test endpoints".to_string());
+        return Err(Failure::SpeedTestFailed);
     }
 
     let counter = format!(
@@ -900,7 +928,7 @@ pub fn speedtest(iface: &str, upload: bool) -> Result<f64, String> {
     }
 
     if children.is_empty() {
-        return Err("Could not start the speed test".to_string());
+        return Err(Failure::SpeedTestFailed);
     }
 
     // Let the streams ramp up before the measurement window opens.
@@ -917,7 +945,7 @@ pub fn speedtest(iface: &str, upload: bool) -> Result<f64, String> {
     }
 
     if seconds <= 0.0 {
-        return Err("Measurement failed".to_string());
+        return Err(Failure::SpeedTestFailed);
     }
 
     Ok((delta as f64 * 8.0) / seconds / 1_000_000.0)

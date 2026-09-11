@@ -2,11 +2,19 @@
 
 mod app;
 mod config;
+mod localize;
 mod model;
 mod net;
 
 /// `--status` prints one round of every reading the panel makes and exits.
 /// Useful for checking the data layer on a machine without opening the popup.
+fn dump_latency(sample: Option<f64>) -> String {
+    match sample {
+        Some(ms) => format!("{} ms", model::format_latency_value(ms)),
+        None => "timeout".to_string(),
+    }
+}
+
 fn dump_status() {
     let status = net::status();
     let (router, internet) = net::pings(&status.gateway);
@@ -34,8 +42,8 @@ fn dump_status() {
     );
     println!(
         "ping          router {} / internet {}",
-        model::format_ping_latency(router.unwrap_or(-1.0), router.is_some()),
-        model::format_ping_latency(internet.unwrap_or(-1.0), internet.is_some())
+        dump_latency(router),
+        dump_latency(internet)
     );
     println!(
         "band          current={} selected={} available={:?} profile={}",
@@ -47,9 +55,8 @@ fn dump_status() {
     println!("\nnetworks:");
     let rows = net::scan(true);
     for (index, row) in rows.iter().enumerate() {
-        let section = model::wifi_section_title(&rows, index).unwrap_or("");
-        if !section.is_empty() {
-            println!("  -- {section}");
+        if let Some(section) = model::wifi_section(&rows, index) {
+            println!("  -- {section:?}");
         }
         println!(
             "  {:>3}%  {:<28} {:?}{}{}",
@@ -69,5 +76,6 @@ fn main() -> cosmic::iced::Result {
     }
 
     tracing_subscriber::fmt::init();
+    localize::localize();
     app::run()
 }

@@ -1,4 +1,4 @@
-# cosmic-wifi-plus
+# cosmic-ext-applet-wifi-plus
 
 An [Omarchy](https://omarchy.org)-style Wi-Fi panel for the COSMIC desktop —
 live link metrics, band pinning and DNS switching in the panel popup.
@@ -63,9 +63,17 @@ The stock COSMIC network applet is left in place; remove it in
 sudo apt install iw
 ```
 
+## Translations
+
+English and Brazilian Portuguese ship in `i18n/`, loaded with
+[i18n-embed](https://github.com/kellpossible/cargo-i18n) + Fluent, the same
+setup the stock COSMIC applets use. The applet follows the desktop locale and
+falls back to English. Adding a language means dropping one `.ftl` file into
+`i18n/<locale>/` — no Rust changes.
+
 ## Checking the data layer
 
-`cosmic-wifi-plus --status` prints one round of every reading the panel
+`cosmic-ext-applet-wifi-plus --status` prints one round of every reading the panel
 makes and exits — handy for confirming the nmcli parsing on a given machine
 without opening the popup.
 

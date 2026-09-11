@@ -4,7 +4,7 @@ set -euo pipefail
 APP_ID="io.github.marcelo_t_tomita.CosmicWifiPlus"
 PANEL_CONFIG="$HOME/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings"
 
-rm -f "$HOME/.local/bin/cosmic-wifi-plus"
+rm -f "$HOME/.local/bin/cosmic-ext-applet-wifi-plus"
 rm -f "$HOME/.local/share/applications/$APP_ID.desktop"
 
 if [[ -f $PANEL_CONFIG ]]; then
