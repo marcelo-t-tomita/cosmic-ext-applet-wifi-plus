@@ -9,10 +9,9 @@ which is portable anywhere NetworkManager runs. This reimplements the panel as a
 native COSMIC applet: the readings and layout follow Omarchy, the UI is
 libcosmic so it docks into `cosmic-panel` and follows the COSMIC theme.
 
-![The panel open on a COSMIC desktop](docs/panel.png)
+![The panel open on a COSMIC desktop](docs/panel-en.png)
 
-*Running in Brazilian Portuguese; network names and addresses in the shot are
-stand-ins.*
+*Network names and addresses in the screenshots are stand-ins.*
 
 ## What the panel shows
 
@@ -75,6 +74,8 @@ English and Brazilian Portuguese ship in `i18n/`, loaded with
 setup the stock COSMIC applets use. The applet follows the desktop locale and
 falls back to English. Adding a language means dropping one `.ftl` file into
 `i18n/<locale>/` — no Rust changes.
+
+![The same panel in Brazilian Portuguese](docs/panel.png)
 
 ## Checking the data layer
 
