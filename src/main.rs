@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 mod app;
+mod config;
 mod model;
 mod net;
 

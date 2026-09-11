@@ -33,6 +33,12 @@ settable, when servers were configured elsewhere).
 connected → known → signal, with connect, disconnect, forget, and inline
 passphrase entry (plus an identity field on WPA-Enterprise).
 
+**Show network name in panel** — a toggle at the foot of the popup puts the
+connected SSID next to the bar icon. On by default, persisted through
+cosmic-config. The label is clipped at 18 characters, and is dropped entirely on
+a vertical panel, on Ethernet, and when offline — cases where it would only cost
+width.
+
 ## Build and install
 
 ```sh

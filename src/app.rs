@@ -8,11 +8,12 @@ use cosmic::iced::core::window;
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::widget::{
-    button, column, container, divider, icon::from_name, indeterminate_circular, qr_code, row,
-    scrollable, secure_input, text, text_input, toggler,
+    button, column, container, divider, icon::from_name, indeterminate_circular, layer_container,
+    qr_code, row, scrollable, secure_input, text, text_input, toggler,
 };
 use cosmic::Element;
 
+use crate::config::Settings;
 use crate::model::{self, PingSamples, Throughput};
 use crate::net::{self, Kind, Security};
 
@@ -25,6 +26,7 @@ const CLOSED_TICKS_PER_POLL: u32 = 4;
 const RESCAN_TICKS: u32 = 5;
 const PHRASE_TICKS: u32 = 5;
 const POPUP_WIDTH: f32 = 420.0;
+const MAX_LABEL_CHARS: usize = 18;
 
 pub fn run() -> cosmic::iced::Result {
     cosmic::applet::run::<WifiPanel>(())
@@ -84,6 +86,7 @@ pub enum Message {
     RunSpeedTest(bool),
     SpeedTestDone(Result<f64, String>),
     OpenCaptivePortal,
+    ToggleSsidLabel(bool),
 }
 
 pub struct WifiPanel {
@@ -115,6 +118,7 @@ pub struct WifiPanel {
 
     qr: Option<qr_code::Data>,
     speedtest: SpeedTest,
+    settings: Settings,
 
     icon_name: String,
 }
@@ -142,6 +146,7 @@ impl Default for WifiPanel {
             failure: None,
             qr: None,
             speedtest: SpeedTest::Idle,
+            settings: Settings::default(),
             icon_name: "network-wireless-offline-symbolic".to_string(),
         }
     }
@@ -213,6 +218,44 @@ impl WifiPanel {
         self.icon_name =
             model::connection_icon(self.status.kind, self.status.signal, self.restricted())
                 .to_string();
+    }
+
+    /// The SSID to show beside the bar icon, or `None` to render the icon
+    /// alone. A vertical panel is only as wide as its icons, so the label is
+    /// dropped there rather than squeezed; Ethernet and a dead link have no
+    /// name worth the space either.
+    fn bar_label(&self) -> Option<String> {
+        if !self.settings.show_ssid || !self.core.applet.is_horizontal() {
+            return None;
+        }
+        if self.status.kind != Kind::Wifi || self.status.ssid.is_empty() {
+            return None;
+        }
+
+        let ssid = &self.status.ssid;
+        if ssid.chars().count() <= MAX_LABEL_CHARS {
+            return Some(ssid.clone());
+        }
+
+        // Count in chars, not bytes: an SSID is arbitrary UTF-8.
+        let clipped: String = ssid.chars().take(MAX_LABEL_CHARS - 1).collect();
+        Some(format!("{clipped}\u{2026}"))
+    }
+
+    fn settings_section(&self) -> Element<'_, Message> {
+        padded_control(
+            row::with_children(vec![
+                text::body("Show network name in panel")
+                    .width(Length::Fill)
+                    .into(),
+                toggler(self.settings.show_ssid)
+                    .on_toggle(Message::ToggleSsidLabel)
+                    .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .into()
     }
 
     fn network(&self, ssid: &str) -> Option<&net::WifiRow> {
@@ -669,6 +712,7 @@ impl cosmic::Application for WifiPanel {
         (
             Self {
                 core,
+                settings: Settings::load(),
                 ..Default::default()
             },
             poll_task(false, false),
@@ -956,6 +1000,10 @@ impl cosmic::Application for WifiPanel {
                 };
             }
 
+            Message::ToggleSsidLabel(show) => {
+                self.settings.set_show_ssid(show);
+            }
+
             Message::OpenCaptivePortal => {
                 // A known plain-HTTP endpoint lets the network redirect the
                 // browser to its login page. The Location header is never
@@ -970,11 +1018,44 @@ impl cosmic::Application for WifiPanel {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        self.core
-            .applet
-            .icon_button(&self.icon_name)
-            .on_press_down(Message::TogglePopup)
-            .into()
+        let Some(label) = self.bar_label() else {
+            return self
+                .core
+                .applet
+                .icon_button(&self.icon_name)
+                .on_press_down(Message::TogglePopup)
+                .into();
+        };
+
+        // `icon_button` is a fixed square, so a label needs a button built by
+        // hand. The sizing mirrors the applet context's own `text_button` so
+        // this sits at the same height as every neighbouring applet.
+        let suggested = self.core.applet.suggested_size(true);
+        let (major, minor) = self.core.applet.suggested_padding(true);
+        let (horizontal_padding, vertical_padding) = if self.core.applet.is_horizontal() {
+            (major, minor)
+        } else {
+            (minor, major)
+        };
+
+        let content = row::with_children(vec![
+            from_name(&*self.icon_name)
+                .size(suggested.0)
+                .symbolic(true)
+                .into(),
+            text::body(label).into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        button::custom(
+            layer_container(content)
+                .center_y(Length::Fixed(f32::from(suggested.1 + 2 * vertical_padding))),
+        )
+        .on_press_down(Message::TogglePopup)
+        .padding([0, horizontal_padding])
+        .class(cosmic::theme::Button::AppletIcon)
+        .into()
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
@@ -1022,6 +1103,9 @@ impl cosmic::Application for WifiPanel {
 
         content = content.push(divider::horizontal::default());
         content = content.push(self.network_list());
+
+        content = content.push(divider::horizontal::default());
+        content = content.push(self.settings_section());
 
         self.core
             .applet
