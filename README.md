@@ -9,6 +9,11 @@ which is portable anywhere NetworkManager runs. This reimplements the panel as a
 native COSMIC applet: the readings and layout follow Omarchy, the UI is
 libcosmic so it docks into `cosmic-panel` and follows the COSMIC theme.
 
+![The panel open on a COSMIC desktop](docs/panel.png)
+
+*Running in Brazilian Portuguese; network names and addresses in the shot are
+stand-ins.*
+
 ## What the panel shows
 
 **Hero** — signal icon, SSID (Ethernet shows its negotiated speed, e.g.
